@@ -1,8 +1,8 @@
 // app/api/patients/route.ts
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
-import { pool } from '@/lib/db';
-import { parsePagination, ok, badRequest, serverError, noStoreJson } from '@/lib/api';
+import { pool } from '@/app/lib/db';
+import { parsePagination, ok, badRequest, serverError, noStoreJson } from '@/app/lib/api';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic'; // never cache

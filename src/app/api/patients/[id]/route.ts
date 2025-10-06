@@ -1,8 +1,8 @@
 // app/api/patients/[id]/route.ts
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
-import { pool } from '@/lib/db';
-import { ok, badRequest, notFound, serverError } from '@/lib/api';
+import { pool } from '@/app/lib/db';
+import { ok, badRequest, notFound, serverError } from '@/app/lib/api';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

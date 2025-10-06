@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { dbHealth } from '@/lib/db';
+import { dbHealth } from '@/app/lib/db';
 
 export const dynamic = 'force-dynamic'; // don't cache
 
