@@ -18,7 +18,7 @@ export default function Page({ searchParams }: { searchParams: SearchParams }) {
     <main className="min-h-dvh p-6">
       <div className="mx-auto w-full max-w-5xl space-y-4">
         <header>
-          <h1 className="text-2xl font-semibold">Agent Device Link</h1>
+          <h1 className="text-2xl font-semibold">Pulsewrx EVV</h1>
           <p className="text-sm text-slate-600">
             Pass <code className="font-mono">?agentId=USER_HASH</code> in the
             URL.
