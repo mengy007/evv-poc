@@ -1,16 +1,39 @@
+// src/app/components/DeviceBootstrap.tsx
 "use client";
-import { useEffect, useState } from "react";
 
+import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
 import { ensureDeviceId } from "@/app/lib/utils";
 
+// Leaflet styles (client-only)
+import "leaflet/dist/leaflet.css";
+
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-// --- shared types (consider moving to @/lib/types)
+// Dynamically import react-leaflet (no SSR)
+const MapContainer = dynamic(
+  () => import("react-leaflet").then((m) => m.MapContainer),
+  { ssr: false }
+);
+const TileLayer = dynamic(
+  () => import("react-leaflet").then((m) => m.TileLayer),
+  { ssr: false }
+);
+const CircleMarker = dynamic(
+  () => import("react-leaflet").then((m) => m.CircleMarker),
+  { ssr: false }
+);
+const Popup = dynamic(() => import("react-leaflet").then((m) => m.Popup), {
+  ssr: false,
+});
+
+/* ------------ Types shared with API rows ------------ */
 type ID = number;
+
 interface UserRow {
   id: ID;
   name: string | null;
@@ -25,9 +48,9 @@ interface SessionRow {
   id: ID;
   userId: ID | null;
   patientId: ID | null;
-  location: unknown;
-  startedAt: string | null;
-  endedAt: string | null;
+  location: unknown; // stored as JSON: [lat, lon]
+  startedAt: string | null; // UTC in DB
+  endedAt: string | null; // UTC in DB (nullable)
   createdAt?: string | null;
   userName?: string | null;
   patientName?: string | null;
@@ -50,6 +73,39 @@ interface SessionsResp extends ApiOk<SessionRow[]> {
   sessions: SessionRow[];
 }
 
+/* ------------ Helpers ------------ */
+
+function parseLatLon(loc: unknown): [number, number] | null {
+  try {
+    const text = typeof loc === "string" ? loc : JSON.stringify(loc ?? "");
+    const arr = JSON.parse(text);
+    if (Array.isArray(arr) && arr.length === 2) {
+      const [lat, lon] = arr;
+      const nlat = Number(lat);
+      const nlon = Number(lon);
+      if (
+        Number.isFinite(nlat) &&
+        Number.isFinite(nlon) &&
+        nlat >= -90 &&
+        nlat <= 90 &&
+        nlon >= -180 &&
+        nlon <= 180
+      )
+        return [nlat, nlon];
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+const formatLocal = (utcTime?: string) =>
+  utcTime
+    ? dayjs.utc(utcTime).tz(dayjs.tz.guess()).format("YYYY-MM-DD HH:mm:ss z")
+    : "—";
+
+/* ------------ Component ------------ */
+
 export default function DeviceBootstrap({
   agentId,
 }: {
@@ -67,15 +123,21 @@ export default function DeviceBootstrap({
     null
   );
   const [isBusy, setIsBusy] = useState(false);
+  const [selected, setSelected] = useState<SessionRow | null>(null); // clicked row -> modal
 
+  // Close modals with Esc
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setConfirmAction(null);
+      if (e.key === "Escape") {
+        if (selected) setSelected(null);
+        else setConfirmAction(null);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [selected]);
 
+  // Bootstrap device id, register, and fetch initial data
   useEffect(() => {
     (async () => {
       try {
@@ -88,6 +150,7 @@ export default function DeviceBootstrap({
             : "Using local ID (browser profile)"
         );
 
+        // Register/upsert and mirror cookie
         const regRes = await fetch("/api/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -99,6 +162,7 @@ export default function DeviceBootstrap({
             (regJson as { error?: string })?.error || "register failed"
           );
 
+        // Patient lookup by device hash
         const chk = await fetch(`/api/patient?hash=${encodeURIComponent(id)}`);
         const chkJson = (await chk.json()) as PatientResp;
         if (!chk.ok)
@@ -111,6 +175,7 @@ export default function DeviceBootstrap({
           null;
         setPatient(patientRec);
 
+        // User lookup by agent hash
         let userRec: UserRow | null = null;
         if (agentId) {
           const ures = await fetch(
@@ -121,6 +186,7 @@ export default function DeviceBootstrap({
           setUser(userRec);
         }
 
+        // Active session?
         if (userRec?.id && patientRec?.id) {
           const sres = await fetch(
             `/api/session?userId=${userRec.id}&patientId=${patientRec.id}`
@@ -129,6 +195,7 @@ export default function DeviceBootstrap({
           if (sres.ok) setSession(sjson.session ?? null);
         }
 
+        // All sessions (filtered if IDs known)
         const rurl = `/api/sessions?${new URLSearchParams({
           ...(userRec?.id ? { userId: String(userRec.id) } : {}),
           ...(patientRec?.id ? { patientId: String(patientRec.id) } : {}),
@@ -147,13 +214,13 @@ export default function DeviceBootstrap({
     })();
   }, [agentId]);
 
+  // Running timer for open session
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | undefined;
     if (session?.startedAt) {
       interval = setInterval(() => {
         const start = new Date(session.startedAt as string).getTime();
-        const now = Date.now();
-        const diff = Math.floor((now - start) / 1000);
+        const diff = Math.floor((Date.now() - start) / 1000);
         const h = Math.floor(diff / 3600);
         const m = Math.floor((diff % 3600) / 60);
         const s = diff % 60;
@@ -171,17 +238,10 @@ export default function DeviceBootstrap({
     };
   }, [session]);
 
-  const formatLocalTime = (utcTime?: string) => {
-    if (!utcTime) return "—";
-    try {
-      return dayjs
-        .utc(utcTime)
-        .tz(dayjs.tz.guess())
-        .format("YYYY-MM-DD HH:mm:ss z");
-    } catch {
-      return utcTime;
-    }
-  };
+  const selectedLatLon = useMemo(
+    () => (selected ? parseLatLon(selected.location) : null),
+    [selected]
+  );
 
   async function doStartSession() {
     try {
@@ -212,6 +272,7 @@ export default function DeviceBootstrap({
       if (!res.ok) throw new Error(json?.error || "start failed");
       if (json.session) setSession(json.session);
 
+      // refresh list
       const rres = await fetch(
         `/api/sessions?userId=${user.id}&patientId=${patient.id}&limit=all`
       );
@@ -240,6 +301,7 @@ export default function DeviceBootstrap({
       if (!res.ok) throw new Error(json?.error || "end failed");
       setSession(null);
 
+      // refresh list
       const rres = await fetch(
         `/api/sessions?userId=${user?.id}&patientId=${patient?.id}&limit=all`
       );
@@ -263,6 +325,7 @@ export default function DeviceBootstrap({
           deviceId: <code className="font-mono">{deviceId || "—"}</code>
         </div>
 
+        {/* Matched User & Patient */}
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">
@@ -308,6 +371,7 @@ export default function DeviceBootstrap({
           </div>
         </div>
 
+        {/* Start/End session controls */}
         {patient && user && (
           <div className="mt-3 space-y-3">
             {session ? (
@@ -343,6 +407,7 @@ export default function DeviceBootstrap({
           </div>
         )}
 
+        {/* All Sessions (clickable rows) */}
         {recent && (
           <div className="mt-6">
             <div className="text-sm font-semibold mb-2">All Sessions</div>
@@ -360,7 +425,11 @@ export default function DeviceBootstrap({
                   </thead>
                   <tbody className="divide-y">
                     {recent.map((r) => (
-                      <tr key={r.id}>
+                      <tr
+                        key={r.id}
+                        onClick={() => setSelected(r)}
+                        className="cursor-pointer hover:bg-slate-100 active:bg-slate-200"
+                      >
                         <td className="px-3 py-2 font-medium">#{r.id}</td>
                         <td className="px-3 py-2">
                           {r.userName ?? r.userId ?? "—"}
@@ -369,10 +438,10 @@ export default function DeviceBootstrap({
                           {r.patientName ?? r.patientId ?? "—"}
                         </td>
                         <td className="px-3 py-2">
-                          {formatLocalTime(r.startedAt ?? undefined)}
+                          {formatLocal(r.startedAt ?? undefined)}
                         </td>
                         <td className="px-3 py-2">
-                          {r.endedAt ? formatLocalTime(r.endedAt) : "(open)"}
+                          {r.endedAt ? formatLocal(r.endedAt) : "(open)"}
                         </td>
                       </tr>
                     ))}
@@ -385,14 +454,14 @@ export default function DeviceBootstrap({
           </div>
         )}
 
+        {/* Start/End confirmation modal */}
         {confirmAction && (
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 animate-fadeIn">
             <div
               className="absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity"
               onClick={() => (!isBusy ? setConfirmAction(null) : null)}
             />
-
-            <div className="relative z-10 w-full sm:w-[28rem] max-w-full rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl ring-1 ring-black/5 transform transition-all sm:scale-100 sm:opacity-100 sm:animate-slideUp">
+            <div className="relative z-10 w-full sm:w-[28rem] max-w-full rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
               <div className="p-5 sm:p-6">
                 <div className="flex items-start gap-3">
                   <div
@@ -457,6 +526,102 @@ export default function DeviceBootstrap({
 
                 <div className="mt-4 flex justify-center sm:hidden">
                   <div className="h-1.5 w-10 rounded-full bg-slate-300" />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Session details + map modal */}
+        {selected && (
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6 animate-fadeIn">
+            <div
+              className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+              onClick={() => setSelected(null)}
+            />
+            <div className="relative z-10 w-full sm:w-[32rem] max-w-full rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+              <div className="p-5 sm:p-6 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base sm:text-lg font-semibold">
+                    Session #{selected.id}
+                  </h2>
+                  <button
+                    onClick={() => setSelected(null)}
+                    className="text-slate-500 hover:text-slate-700 text-sm"
+                  >
+                    Close ✕
+                  </button>
+                </div>
+
+                <div className="text-xs text-slate-600">
+                  <div>
+                    User:{" "}
+                    <span className="font-medium">
+                      {selected.userName ?? selected.userId ?? "—"}
+                    </span>
+                  </div>
+                  <div>
+                    Patient:{" "}
+                    <span className="font-medium">
+                      {selected.patientName ?? selected.patientId ?? "—"}
+                    </span>
+                  </div>
+                  <div>
+                    Started:{" "}
+                    <span className="font-medium">
+                      {formatLocal(selected.startedAt ?? undefined)}
+                    </span>
+                  </div>
+                  <div>
+                    Ended:{" "}
+                    <span className="font-medium">
+                      {selected.endedAt
+                        ? formatLocal(selected.endedAt)
+                        : "(open)"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl overflow-hidden border border-slate-200">
+                  {selectedLatLon ? (
+                    <div className="h-72 w-full">
+                      <MapContainer
+                        center={selectedLatLon}
+                        zoom={15}
+                        scrollWheelZoom={false}
+                        style={{ height: "100%", width: "100%" }}
+                      >
+                        <TileLayer
+                          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                          attribution="&copy; OpenStreetMap contributors"
+                        />
+                        <CircleMarker
+                          center={selectedLatLon}
+                          radius={10}
+                          pathOptions={{ color: "#2563eb" }}
+                        >
+                          <Popup>
+                            <div className="text-xs">
+                              <div>
+                                <b>Session #{selected.id}</b>
+                              </div>
+                              <div>
+                                {formatLocal(selected.startedAt ?? undefined)}
+                              </div>
+                              <div>
+                                Lat, Lon: {selectedLatLon[0].toFixed(5)},{" "}
+                                {selectedLatLon[1].toFixed(5)}
+                              </div>
+                            </div>
+                          </Popup>
+                        </CircleMarker>
+                      </MapContainer>
+                    </div>
+                  ) : (
+                    <div className="h-48 flex items-center justify-center text-xs text-slate-500">
+                      No location stored for this session.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
