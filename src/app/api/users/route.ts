@@ -1,46 +1,96 @@
-// app/api/users/route.ts
-import { NextRequest } from 'next/server';
-import { z } from 'zod';
-import { pool } from '@/app/lib/db';
-import { parsePagination, ok, badRequest, serverError, noStoreJson } from '@/app/lib/api';
+// src/app/api/users/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { pool } from "@/app/lib/db";
+import type { RowDataPacket, ResultSetHeader } from "mysql2/promise";
+import { randomBytes } from "crypto";
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = "nodejs";
 
-const CreateUser = z.object({
-  hash: z.string().max(128).nullable().optional(),
-  name: z.string().max(128).nullable().optional(),
-});
+type ID = number;
 
-export async function GET(req: NextRequest) {
-  try {
-    const { limit, offset } = parsePagination(req.url);
-    const [rows] = await pool.query(
-      'SELECT id, hash, name FROM User ORDER BY id DESC LIMIT ? OFFSET ?',
-      [limit, offset]
-    );
-    return ok(rows);
-  } catch (e) {
-    return serverError(e, 'Failed to list users');
-  }
+export interface UserRow {
+  id: ID;
+  name: string | null;
+  hash: string | null;
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const parsed = CreateUser.safeParse(await req.json());
-    if (!parsed.success) return badRequest('Validation failed', { issues: parsed.error.issues });
+type UsersOk = { ok: true; users: UserRow[] };
+type CreateOk = { ok: true; user: UserRow };
+type Err = { error: string };
 
-    const { hash = null, name = null } = parsed.data;
-    const [result] = await pool.execute(
-      'INSERT INTO User (hash, name) VALUES (?, ?)',
-      [hash, name]
-    );
-    // @ts-ignore
-    const insertId: number = result.insertId;
+// parse limit=all | N (default 10, cap 1000)
+function parseLimit(limitParam: string | null): number | null {
+  if (limitParam === "all") return null;
+  if (limitParam == null) return 10;
+  const n = Number(limitParam);
+  if (!Number.isFinite(n) || n <= 0) return 10;
+  return Math.min(n, 1000);
+}
 
-    const [rows] = await pool.query('SELECT id, hash, name FROM User WHERE id = ?', [insertId]);
-    return noStoreJson((rows as any[])[0], { status: 201 });
-  } catch (e) {
-    return serverError(e, 'Failed to create user');
+/**
+ * GET /api/users?limit=all|N
+ */
+export async function GET(req: NextRequest): Promise<NextResponse<UsersOk | Err>> {
+  const { searchParams } = new URL(req.url);
+  const limit = parseLimit(searchParams.get("limit"));
+
+  const limitSql = limit === null ? "" : "LIMIT ?";
+  const params: Array<string | number> = [];
+  if (limit !== null) params.push(limit);
+
+  const [rows] = await pool().query<RowDataPacket[]>(
+    `SELECT id, name, hash
+       FROM \`User\`
+      ORDER BY id DESC
+      ${limitSql}`,
+    params
+  );
+
+  const users: UserRow[] = rows.map((r) => ({
+    id: Number(r.id),
+    name: (r.name as string | null) ?? null,
+    hash: (r.hash as string | null) ?? null,
+  }));
+
+  return NextResponse.json({ ok: true, users });
+}
+
+/**
+ * POST /api/users
+ * Body: { name?: string | null, hash?: string | null }
+ */
+export async function POST(req: NextRequest): Promise<NextResponse<CreateOk | Err>> {
+  const body = (await req.json().catch(() => ({}))) as {
+    name?: string | null;
+    hash?: string | null;
+  };
+
+  const name = (typeof body.name === "string" ? body.name.trim() : null) || null;
+  const hash =
+    (typeof body.hash === "string" ? body.hash.trim() : null) ||
+    randomBytes(16).toString("hex");
+
+  const [ins] = await pool().execute<ResultSetHeader>(
+    "INSERT INTO `User` (`name`, `hash`) VALUES (?, ?)",
+    [name, hash]
+  );
+  const insertedId = Number(ins.insertId);
+
+  const [rows] = await pool().query<RowDataPacket[]>(
+    "SELECT id, name, hash FROM `User` WHERE id = ? LIMIT 1",
+    [insertedId]
+  );
+
+  const row = rows[0];
+  if (!row) {
+    return NextResponse.json({ error: "Insert succeeded but row not found." }, { status: 500 });
   }
+
+  const user: UserRow = {
+    id: insertedId,
+    name: (row.name as string | null) ?? null,
+    hash: (row.hash as string | null) ?? null,
+  };
+
+  return NextResponse.json({ ok: true, user });
 }

@@ -1,52 +1,107 @@
-export function base64url(buf: ArrayBuffer | Uint8Array): string {
-  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  let s = "";
-  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
-  return btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+// src/app/lib/utils.ts
+
+/**
+ * Utilities used on the client for deriving a stable device identifier.
+ * Attempts WebAuthn (device-bound credential); falls back to a local ID.
+ */
+
+export type DeviceIdMethod = "webauthn" | "local";
+
+export interface DeviceIdResult {
+  id: string;
+  method: DeviceIdMethod;
 }
 
-export function getOrCreateLocalId(): string {
-  if (typeof localStorage === "undefined") return crypto.randomUUID();
-  let id = localStorage.getItem("device_local_id");
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem("device_local_id", id); }
-  
+/** Storage key for fallback local device id */
+const LOCAL_DEVICE_KEY = "device-id";
+
+/**
+ * Generate (or load) a local device identifier tied to the browser profile.
+ * Uses crypto.randomUUID() where available; otherwise falls back to a short hash.
+ */
+function getOrCreateLocalDeviceId(): string {
+  if (typeof window === "undefined") return "server";
+  const existing = window.localStorage.getItem(LOCAL_DEVICE_KEY);
+  if (existing && existing.trim()) return existing;
+
+  const id =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? (crypto.randomUUID() as string)
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  window.localStorage.setItem(LOCAL_DEVICE_KEY, id);
   return id;
 }
 
-async function createWebAuthnId(): Promise<string> {
-  if (!("credentials" in navigator) || !("PublicKeyCredential" in window)) {
-    throw new Error("WebAuthn not supported");
-  }
-  const challenge = crypto.getRandomValues(new Uint8Array(32));
-  const userId = crypto.getRandomValues(new Uint8Array(16));
-  const cred = (await navigator.credentials.create({
-    publicKey: {
-      challenge,
-      rp: { name: "Agent Device ID" },
-      user: { id: userId, name: "agent", displayName: "agent" },
-      pubKeyCredParams: [ { type: "public-key", alg: -7 }, { type: "public-key", alg: -257 } ],
-      authenticatorSelection: { authenticatorAttachment: "platform", residentKey: "preferred", userVerification: "preferred" },
-      attestation: "none",
-      timeout: 60000,
-    },
-  })) as PublicKeyCredential | null;
-  if (!cred) throw new Error("No credential returned");
-  const raw = (cred as any).rawId as ArrayBuffer;
-  const id = base64url(raw);
-  localStorage.setItem("device_webauthn_id", id);
-  return id;
-}
+/**
+ * Try to create a device-bound WebAuthn credential and derive a stable id from it.
+ * Note: This is a best-effort approach and may require user gesture/permissions.
+ * If anything fails, we return null to allow fallback to a local id.
+ */
+async function tryWebAuthnDeviceId(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  if (!("PublicKeyCredential" in window)) return null;
 
-/** Ensure we have a device identifier sourced from the device (WebAuthn preferred). */
-export async function ensureDeviceId(): Promise<{ id: string; method: "webauthn" | "local" }> {
   try {
-    const existingWA = typeof localStorage !== "undefined" ? localStorage.getItem("device_webauthn_id") : null;
-    if (existingWA) return { id: existingWA, method: "webauthn" };
-    const id = await createWebAuthnId();
+    // Minimal, RP-agnostic challenge (not for authentication; just to bind to device)
+    const challenge = new Uint8Array(16);
+    if (typeof crypto !== "undefined" && "getRandomValues" in crypto) {
+      crypto.getRandomValues(challenge);
+    }
 
-    return { id, method: "webauthn" };
-  } catch (_) {
-    const id = getOrCreateLocalId();
-    return { id, method: "local" };
+    const pubKey: PublicKeyCredentialCreationOptions = {
+      challenge,
+      rp: { name: "Device ID Bootstrap" },
+      user: {
+        id: new TextEncoder().encode("device-seed"),
+        name: "device@example.invalid",
+        displayName: "Device",
+      },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        userVerification: "preferred",
+        residentKey: "preferred",
+        requireResidentKey: false,
+      },
+      timeout: 30_000,
+    };
+
+    const cred = (await navigator.credentials.create({
+      publicKey: pubKey,
+    })) as PublicKeyCredential | null;
+
+    if (!cred) return null;
+
+    // Derive a stable identifier from the credential ID (base64url)
+    const rawId = cred.rawId; // ArrayBuffer
+    const b64url = bufferToBase64Url(rawId);
+    return `webauthn:${b64url}`;
+  } catch {
+    return null;
   }
+}
+
+/** Convert ArrayBuffer -> base64url (RFC4648 §5, no padding) */
+function bufferToBase64Url(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let str = "";
+  for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+  const b64 = typeof btoa !== "undefined" ? btoa(str) : Buffer.from(str, "binary").toString("base64");
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+/**
+ * Public entry: returns a device identifier and the method used.
+ * - First tries WebAuthn for a device-bound credential
+ * - Falls back to a local (profile-bound) ID stored in localStorage
+ */
+export async function ensureDeviceId(): Promise<DeviceIdResult> {
+  // Only attempt WebAuthn client-side
+  if (typeof window !== "undefined") {
+    const webAuthn = await tryWebAuthnDeviceId();
+    if (webAuthn) return { id: webAuthn, method: "webauthn" };
+  }
+  const local = getOrCreateLocalDeviceId();
+  return { id: local, method: "local" };
 }

@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
@@ -8,6 +9,47 @@ import { ensureDeviceId } from "@/app/lib/utils";
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+// --- shared types (consider moving to @/lib/types)
+type ID = number;
+interface UserRow {
+  id: ID;
+  name: string | null;
+  hash: string | null;
+}
+interface PatientRow {
+  id: ID;
+  name: string | null;
+  hash: string | null;
+}
+interface SessionRow {
+  id: ID;
+  userId: ID | null;
+  patientId: ID | null;
+  location: unknown;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt?: string | null;
+  userName?: string | null;
+  patientName?: string | null;
+}
+
+interface ApiOk<T> {
+  ok: true;
+  [k: string]: unknown;
+}
+interface UserResp extends ApiOk<UserRow | null> {
+  user: UserRow | null;
+}
+interface PatientResp extends ApiOk<PatientRow | null> {
+  patient: PatientRow | null;
+}
+interface SessionResp extends ApiOk<SessionRow | null> {
+  session: SessionRow | null;
+}
+interface SessionsResp extends ApiOk<SessionRow[]> {
+  sessions: SessionRow[];
+}
+
 export default function DeviceBootstrap({
   agentId,
 }: {
@@ -15,10 +57,10 @@ export default function DeviceBootstrap({
 }) {
   const [status, setStatus] = useState<string>("Detecting device ID…");
   const [deviceId, setDeviceId] = useState<string>("");
-  const [patient, setPatient] = useState<any>(null);
-  const [user, setUser] = useState<any>(null);
-  const [session, setSession] = useState<any>(null);
-  const [recent, setRecent] = useState<any[]>([]);
+  const [patient, setPatient] = useState<PatientRow | null>(null);
+  const [user, setUser] = useState<UserRow | null>(null);
+  const [session, setSession] = useState<SessionRow | null>(null);
+  const [recent, setRecent] = useState<SessionRow[]>([]);
   const [error, setError] = useState<string>("");
   const [elapsed, setElapsed] = useState<string>("");
   const [confirmAction, setConfirmAction] = useState<null | "start" | "end">(
@@ -51,21 +93,30 @@ export default function DeviceBootstrap({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ agentId, deviceId: id }),
         });
-        const regJson = await regRes.json();
-        if (!regRes.ok) throw new Error(regJson?.error || "register failed");
+        const regJson = (await regRes.json()) as Record<string, unknown>;
+        if (!regRes.ok)
+          throw new Error(
+            (regJson as { error?: string })?.error || "register failed"
+          );
 
         const chk = await fetch(`/api/patient?hash=${encodeURIComponent(id)}`);
-        const chkJson = await chk.json();
-        if (!chk.ok) throw new Error(chkJson?.error || "lookup failed");
-        const patientRec = chkJson.patient ?? regJson.patient ?? null;
+        const chkJson = (await chk.json()) as PatientResp;
+        if (!chk.ok)
+          throw new Error(
+            (chkJson as unknown as { error?: string })?.error || "lookup failed"
+          );
+        const patientRec =
+          chkJson.patient ??
+          (regJson as { patient?: PatientRow })?.patient ??
+          null;
         setPatient(patientRec);
 
-        let userRec: any = null;
+        let userRec: UserRow | null = null;
         if (agentId) {
           const ures = await fetch(
             `/api/user?hash=${encodeURIComponent(agentId)}`
           );
-          const ujson = await ures.json();
+          const ujson = (await ures.json()) as UserResp;
           if (ures.ok) userRec = ujson.user ?? null;
           setUser(userRec);
         }
@@ -74,7 +125,7 @@ export default function DeviceBootstrap({
           const sres = await fetch(
             `/api/session?userId=${userRec.id}&patientId=${patientRec.id}`
           );
-          const sjson = await sres.json();
+          const sjson = (await sres.json()) as SessionResp;
           if (sres.ok) setSession(sjson.session ?? null);
         }
 
@@ -84,23 +135,23 @@ export default function DeviceBootstrap({
           limit: "all",
         }).toString()}`;
         const rres = await fetch(rurl);
-        const rjson = await rres.json();
+        const rjson = (await rres.json()) as SessionsResp;
         if (rres.ok)
           setRecent(Array.isArray(rjson.sessions) ? rjson.sessions : []);
 
         setStatus("Ready");
-      } catch (e: any) {
-        setError(e?.message || String(e));
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : String(e));
         setStatus("Error");
       }
     })();
   }, [agentId]);
 
   useEffect(() => {
-    let interval: any;
-    if (session && session.startedAt) {
+    let interval: ReturnType<typeof setInterval> | undefined;
+    if (session?.startedAt) {
       interval = setInterval(() => {
-        const start = new Date(session.startedAt).getTime();
+        const start = new Date(session.startedAt as string).getTime();
         const now = Date.now();
         const diff = Math.floor((now - start) / 1000);
         const h = Math.floor(diff / 3600);
@@ -115,14 +166,18 @@ export default function DeviceBootstrap({
     } else {
       setElapsed("");
     }
-    return () => clearInterval(interval);
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, [session]);
 
   const formatLocalTime = (utcTime?: string) => {
-    console.log({ utcTime });
     if (!utcTime) return "—";
     try {
-      return dayjs.utc(utcTime).local().format("YYYY-MM-DD h:mm:ss a");
+      return dayjs
+        .utc(utcTime)
+        .tz(dayjs.tz.guess())
+        .format("YYYY-MM-DD HH:mm:ss z");
     } catch {
       return utcTime;
     }
@@ -150,18 +205,21 @@ export default function DeviceBootstrap({
           location: [pos.lat, pos.lon],
         }),
       });
-      const json = await res.json();
+      const json = (await res.json()) as {
+        error?: string;
+        session?: SessionRow;
+      };
       if (!res.ok) throw new Error(json?.error || "start failed");
-      setSession(json.session);
+      if (json.session) setSession(json.session);
 
       const rres = await fetch(
         `/api/sessions?userId=${user.id}&patientId=${patient.id}&limit=all`
       );
-      const rjson = await rres.json();
+      const rjson = (await rres.json()) as SessionsResp;
       if (rres.ok)
         setRecent(Array.isArray(rjson.sessions) ? rjson.sessions : []);
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsBusy(false);
       setConfirmAction(null);
@@ -175,18 +233,21 @@ export default function DeviceBootstrap({
       const res = await fetch(`/api/session?id=${session.id}`, {
         method: "PUT",
       });
-      const json = await res.json();
+      const json = (await res.json()) as {
+        error?: string;
+        session?: SessionRow | null;
+      };
       if (!res.ok) throw new Error(json?.error || "end failed");
       setSession(null);
 
       const rres = await fetch(
         `/api/sessions?userId=${user?.id}&patientId=${patient?.id}&limit=all`
       );
-      const rjson = await rres.json();
+      const rjson = (await rres.json()) as SessionsResp;
       if (rres.ok)
         setRecent(Array.isArray(rjson.sessions) ? rjson.sessions : []);
-    } catch (e: any) {
-      setError(e.message || String(e));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setIsBusy(false);
       setConfirmAction(null);
@@ -298,7 +359,7 @@ export default function DeviceBootstrap({
                     </tr>
                   </thead>
                   <tbody className="divide-y">
-                    {recent.map((r: any) => (
+                    {recent.map((r) => (
                       <tr key={r.id}>
                         <td className="px-3 py-2 font-medium">#{r.id}</td>
                         <td className="px-3 py-2">
@@ -308,7 +369,7 @@ export default function DeviceBootstrap({
                           {r.patientName ?? r.patientId ?? "—"}
                         </td>
                         <td className="px-3 py-2">
-                          {formatLocalTime(r.startedAt)}
+                          {formatLocalTime(r.startedAt ?? undefined)}
                         </td>
                         <td className="px-3 py-2">
                           {r.endedAt ? formatLocalTime(r.endedAt) : "(open)"}
