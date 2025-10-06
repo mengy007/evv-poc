@@ -2,34 +2,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import dynamic from "next/dynamic";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
 import { ensureDeviceId } from "@/app/lib/utils";
-
-// Leaflet styles (client-only)
-import "leaflet/dist/leaflet.css";
+import LeafletMapClient from "@/app/components/LeafletMapClient";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
-
-// Dynamically import react-leaflet (no SSR)
-const MapContainer = dynamic(
-  () => import("react-leaflet").then((m) => m.MapContainer),
-  { ssr: false }
-);
-const TileLayer = dynamic(
-  () => import("react-leaflet").then((m) => m.TileLayer),
-  { ssr: false }
-);
-const CircleMarker = dynamic(
-  () => import("react-leaflet").then((m) => m.CircleMarker),
-  { ssr: false }
-);
-const Popup = dynamic(() => import("react-leaflet").then((m) => m.Popup), {
-  ssr: false,
-});
 
 /* ------------ Types shared with API rows ------------ */
 type ID = number;
@@ -56,20 +36,20 @@ interface SessionRow {
   patientName?: string | null;
 }
 
-interface ApiOk<T> {
+interface ApiOk {
   ok: true;
   [k: string]: unknown;
 }
-interface UserResp extends ApiOk<UserRow | null> {
+interface UserResp extends ApiOk {
   user: UserRow | null;
 }
-interface PatientResp extends ApiOk<PatientRow | null> {
+interface PatientResp extends ApiOk {
   patient: PatientRow | null;
 }
-interface SessionResp extends ApiOk<SessionRow | null> {
+interface SessionResp extends ApiOk {
   session: SessionRow | null;
 }
-interface SessionsResp extends ApiOk<SessionRow[]> {
+interface SessionsResp extends ApiOk {
   sessions: SessionRow[];
 }
 
@@ -77,6 +57,7 @@ interface SessionsResp extends ApiOk<SessionRow[]> {
 
 function parseLatLon(loc: unknown): [number, number] | null {
   try {
+    // On the client, Buffer isn't present; keep this simple and safe.
     const text = typeof loc === "string" ? loc : JSON.stringify(loc ?? "");
     const arr = JSON.parse(text);
     if (Array.isArray(arr) && arr.length === 2) {
@@ -90,11 +71,12 @@ function parseLatLon(loc: unknown): [number, number] | null {
         nlat <= 90 &&
         nlon >= -180 &&
         nlon <= 180
-      )
+      ) {
         return [nlat, nlon];
+      }
     }
   } catch {
-    /* ignore */
+    // ignore parse errors
   }
   return null;
 }
@@ -170,8 +152,8 @@ export default function DeviceBootstrap({
             (chkJson as unknown as { error?: string })?.error || "lookup failed"
           );
         const patientRec =
-          chkJson.patient ??
-          (regJson as { patient?: PatientRow })?.patient ??
+          chkJson.patient ||
+          (regJson as { patient?: PatientRow })?.patient ||
           null;
         setPatient(patientRec);
 
@@ -584,39 +566,15 @@ export default function DeviceBootstrap({
 
                 <div className="rounded-xl overflow-hidden border border-slate-200">
                   {selectedLatLon ? (
-                    <div className="h-72 w-full">
-                      <MapContainer
-                        center={selectedLatLon}
-                        zoom={15}
-                        scrollWheelZoom={false}
-                        style={{ height: "100%", width: "100%" }}
-                      >
-                        <TileLayer
-                          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                          attribution="&copy; OpenStreetMap contributors"
-                        />
-                        <CircleMarker
-                          center={selectedLatLon}
-                          radius={10}
-                          pathOptions={{ color: "#2563eb" }}
-                        >
-                          <Popup>
-                            <div className="text-xs">
-                              <div>
-                                <b>Session #{selected.id}</b>
-                              </div>
-                              <div>
-                                {formatLocal(selected.startedAt ?? undefined)}
-                              </div>
-                              <div>
-                                Lat, Lon: {selectedLatLon[0].toFixed(5)},{" "}
-                                {selectedLatLon[1].toFixed(5)}
-                              </div>
-                            </div>
-                          </Popup>
-                        </CircleMarker>
-                      </MapContainer>
-                    </div>
+                    <LeafletMapClient
+                      center={selectedLatLon}
+                      zoom={15}
+                      showMarker
+                      popupTitle={`Session #${selected.id}`}
+                      popupSubtitle={formatLocal(
+                        selected.startedAt ?? undefined
+                      )}
+                    />
                   ) : (
                     <div className="h-48 flex items-center justify-center text-xs text-slate-500">
                       No location stored for this session.
